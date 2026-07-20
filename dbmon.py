@@ -129,8 +129,21 @@ def default_sink():
             m_ds.group(1) if m_ds else m_nm.group(1),
             0.0 if muted else (float(m_v.group(1)) if m_v else 1.0))
 
+def sink_running(sink_id):
+    """True if the sink is actively playing (node state 'running'). Lets us avoid
+    opening a capture stream while idle, so the desktop mic indicator only appears
+    during actual playback (GNOME flags any capture, even a monitor, as mic use)."""
+    try:
+        out = subprocess.run(["pw-cli", "info", str(sink_id)], capture_output=True, text=True, timeout=3).stdout
+        m = re.search(r'state:\s*"?(\w+)', out)
+        return bool(m and m.group(1) == "running")
+    except Exception:
+        return True
+
 def capture(sink_id, secs=CHUNK):
-    """Capture the sink monitor for `secs`; return (rms_dbfs, peak_dbfs) or None."""
+    """Capture the sink monitor for `secs` via stream.capture.sink; return
+    (rms_dbfs, peak_dbfs) or None. Callers gate this on playback so the desktop
+    mic indicator only appears while audio is actually playing."""
     tmp = tempfile.mktemp(suffix=".raw", dir="/tmp")
     try:
         subprocess.run(["timeout", f"{secs+0.4:.1f}", "pw-record",
@@ -198,6 +211,8 @@ def cmd_daemon(args):
             time.sleep(3); continue
         sid, name, desc, vol = s
         upsert_device(c, name, desc); c.commit()   # log ALL devices, always
+        if not sink_running(sid):
+            time.sleep(2); continue
         res = capture(sid, CHUNK)
         if res is None:
             time.sleep(1); continue
@@ -221,6 +236,16 @@ def cmd_live(args):
             sid, name, desc, vol = s
             upsert_device(c, name, desc); c.commit()
             wl = whitelist_set(c)
+            if not sink_running(sid):
+                if as_json:
+                    print(json.dumps({"device": name, "label": desc, "volume": vol,
+                        "rms_dbfs": -120.0, "peak_dbfs": -120.0, "spl": None, "peak_spl": None,
+                        "silent": True, "calibrated": bool(calib_rows(c, name)),
+                        "whitelisted": (name in wl), "cap": cap, "over_cap": False,
+                        "ts": time.time()}), flush=True)
+                else:
+                    print(f"{desc[:22]:22} {vol*100:3.0f}%   (idle)                    ", end="\r")
+                time.sleep(1); continue
             res = capture(sid, 1.0)
             if res:
                 rms, peak = res
