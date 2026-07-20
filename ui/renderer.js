@@ -117,37 +117,42 @@ async function loadReport() {
   drawChart(r.by_day || []);
 }
 
-// ----- chart (Apple-style level bars) -----
+// ----- chart (Apple-style range capsules: min..max per day) -----
 function barColor(d) {
-  if (d.leq != null && d.leq > currentCap) return '#ff5c5c';
-  if (d.max != null && d.max > currentCap) return '#f5a623';
-  return '#35d0a5';
+  return (d.max != null && d.max > currentCap) ? '#ff6b6b' : '#35d0a5';
 }
 function drawChart(byDay) {
   byDayGlobal = byDay;
   const labels = byDay.map(d => d.date.slice(5));
+  const ranges = byDay.map(d => (d.min != null && d.max != null) ? [d.min, d.max] : null);
   const data = {
     labels,
     datasets: [
-      { type: 'bar', label: 'Avg level (dB)', data: byDay.map(d => d.leq), backgroundColor: byDay.map(barColor), borderRadius: 5, yAxisID: 'y' },
-      { type: 'line', label: 'Peak (dB)', data: byDay.map(d => d.max), borderColor: '#c9d1dc', backgroundColor: '#c9d1dc', pointRadius: 2, tension: .3, fill: false, yAxisID: 'y' },
-      { type: 'line', label: `Cap (${currentCap} dB)`, data: byDay.map(() => currentCap), borderColor: '#ff5c5c', borderDash: [6, 4], pointRadius: 0, yAxisID: 'y' }
+      { type: 'bar', label: 'Range (dB)', data: ranges, backgroundColor: byDay.map(barColor),
+        borderRadius: 20, borderSkipped: false, barPercentage: 0.55, categoryPercentage: 0.7, maxBarThickness: 26, yAxisID: 'y' },
+      { type: 'line', label: 'Average', data: byDay.map(d => d.leq), showLine: false, pointRadius: 3, pointBackgroundColor: '#eaeef3', pointBorderColor: '#0d0f13', yAxisID: 'y' },
+      { type: 'line', label: `Cap ${currentCap} dB`, data: byDay.map(() => currentCap), borderColor: 'rgba(255,107,107,.7)', borderDash: [5, 5], pointRadius: 0, borderWidth: 1.5, yAxisID: 'y' }
     ]
   };
   const opts = {
     responsive: true, maintainAspectRatio: false,
     interaction: { mode: 'index', intersect: false },
     scales: {
-      x: { grid: { color: '#20242e' }, ticks: { color: '#8a909a' } },
-      y: { suggestedMin: 40, suggestedMax: 100, grid: { color: '#20242e' }, ticks: { color: '#8a909a' }, title: { display: true, text: 'dB SPL', color: '#8a909a' } }
+      x: { grid: { display: false }, ticks: { color: '#8b93a1' } },
+      y: { suggestedMin: 30, suggestedMax: 100, grid: { color: 'rgba(255,255,255,.05)' }, ticks: { color: '#8b93a1', stepSize: 10 }, title: { display: true, text: 'dB SPL', color: '#5f6672' } }
     },
     plugins: {
-      legend: { labels: { color: '#c7ccd4', boxWidth: 12 } },
+      legend: { labels: { color: '#c7ccd4', boxWidth: 10, usePointStyle: true } },
       tooltip: {
         callbacks: {
+          label: (item) => {
+            const d = byDayGlobal[item.dataIndex]; if (!d) return '';
+            if (item.datasetIndex === 0) return `Range: ${d.min} to ${d.max} dB`;
+            if (item.datasetIndex === 1) return `Average: ${d.leq} dB`;
+            return '';
+          },
           afterBody: (items) => {
-            const d = byDayGlobal[items[0].dataIndex];
-            if (!d) return '';
+            const d = byDayGlobal[items[0].dataIndex]; if (!d) return '';
             return `Listening: ${d.hours.toFixed(2)} h\nOver cap: ${d.over_hours.toFixed(2)} h`;
           }
         }
@@ -193,8 +198,10 @@ $('tabs').addEventListener('click', (e) => {
   [...$('tabs').children].forEach(b => b.classList.remove('active'));
   e.target.classList.add('active');
   const tab = e.target.dataset.tab;
-  $('view-dashboard').classList.toggle('active', tab === 'dashboard');
-  $('view-settings').classList.toggle('active', tab === 'settings');
+  ['dashboard', 'settings', 'calibration', 'spectrum'].forEach(v =>
+    $('view-' + v).classList.toggle('active', tab === v));
+  if (tab === 'calibration') { buildCalTable(); loadCalList(); }
+  if (tab === 'spectrum') { initSpectrumInputs(); } else { stopSpectrum(); }
 });
 
 // ----- controls -----
@@ -228,6 +235,130 @@ $('allDefaultChk').addEventListener('change', async (e) => {
   $('allChk').checked = e.target.checked;
   loadReport(); loadDevices();
 });
+
+// ----- calibration -----
+const CAL_LEVELS = [6, 12, 18];
+let calRows = [];
+let calDevice = null, calVolume = 0.5;
+function buildCalTable() {
+  calRows = CAL_LEVELS.map(l => ({ level: l, rms: null, spl: null }));
+  const tb = $('calTable').querySelector('tbody');
+  tb.innerHTML = calRows.map((r, i) =>
+    `<tr><td>-${r.level} dBFS</td>` +
+    `<td><button class="btn" data-i="${i}">Play</button></td>` +
+    `<td class="rmsCell muted">--</td>` +
+    `<td><input type="number" class="splIn select" data-i="${i}" style="width:100px" placeholder="dB"></td></tr>`).join('');
+  tb.querySelectorAll('button').forEach(b => b.addEventListener('click', () => playCal(parseInt(b.dataset.i, 10))));
+  tb.querySelectorAll('.splIn').forEach(inp => inp.addEventListener('change', () => { calRows[parseInt(inp.dataset.i, 10)].spl = parseFloat(inp.value); }));
+  $('calMsg').textContent = '';
+}
+async function playCal(i) {
+  const freq = parseFloat($('calFreq').value);
+  const btns = $('calTable').querySelectorAll('button');
+  btns[i].textContent = '...'; btns[i].disabled = true;
+  const r = await window.api.playtone(freq, calRows[i].level);
+  btns[i].textContent = 'Play'; btns[i].disabled = false;
+  if (r && r.rms != null) {
+    calRows[i].rms = r.rms; calDevice = r.device; calVolume = r.volume;
+    $('calTable').querySelectorAll('.rmsCell')[i].textContent = r.rms + ' dBFS';
+    $('calDevInfo').textContent = (r.label || '') + '  vol ' + Math.round(r.volume * 100) + '%';
+  } else {
+    $('calMsg').textContent = 'capture failed (no output device?)';
+  }
+}
+async function saveCal() {
+  const freq = parseFloat($('calFreq').value);
+  const pts = calRows.filter(r => r.rms != null && r.spl != null && !isNaN(r.spl));
+  if (pts.length < 2) { $('calMsg').textContent = 'Need at least 2 measured points.'; return; }
+  if (!calDevice) { $('calMsg').textContent = 'Play a tone first to detect the device.'; return; }
+  const n = pts.length;
+  const sx = pts.reduce((a, p) => a + p.rms, 0), sy = pts.reduce((a, p) => a + p.spl, 0);
+  const sxx = pts.reduce((a, p) => a + p.rms * p.rms, 0), sxy = pts.reduce((a, p) => a + p.rms * p.spl, 0);
+  const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+  const offset = (sy - slope * sx) / n;
+  await window.api.addCalib(calDevice, calVolume, freq, slope, offset);
+  $('calMsg').textContent = `Saved ${freq} Hz: SPL = ${slope.toFixed(3)} x dBFS + ${offset.toFixed(1)}`;
+  loadCalList(); loadDevices(); loadReport();
+}
+async function loadCalList() {
+  const list = await window.api.calibList();
+  const tb = $('calList').querySelector('tbody');
+  tb.innerHTML = '';
+  list.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td>${escapeHtml(r.label)}</td><td>${Math.round(r.volume * 100)}%</td>` +
+      `<td>${r.freq} Hz</td><td>SPL = ${r.slope.toFixed(3)} x dBFS + ${r.offset.toFixed(1)}</td>` +
+      `<td><button class="btn">Delete</button></td>`;
+    tr.querySelector('button').addEventListener('click', async () => {
+      await window.api.delCalib(r.device, r.volume, r.freq);
+      loadCalList(); loadReport(); loadDevices();
+    });
+    tb.appendChild(tr);
+  });
+}
+$('calSave').addEventListener('click', saveCal);
+
+// ----- spectrum (Web Audio FFT on the output monitor) -----
+let specStream = null, specCtx = null, specRAF = null, specAnalyser = null;
+async function initSpectrumInputs() {
+  try { const t = await navigator.mediaDevices.getUserMedia({ audio: true }); t.getTracks().forEach(x => x.stop()); } catch (e) {}
+  const devs = await navigator.mediaDevices.enumerateDevices();
+  const inputs = devs.filter(d => d.kind === 'audioinput');
+  const sel = $('specInput');
+  sel.innerHTML = inputs.map(d => `<option value="${d.deviceId}">${escapeHtml(d.label || d.deviceId)}</option>`).join('');
+  const mon = inputs.find(d => /monitor/i.test(d.label));
+  if (mon) sel.value = mon.deviceId;
+  $('specMsg').textContent = mon ? 'Ready. Press Start.' : 'Pick the "Monitor of ..." input to see your output, then Start.';
+}
+async function startSpectrum() {
+  stopSpectrum();
+  const id = $('specInput').value;
+  try {
+    specStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: id ? { exact: id } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  } catch (e) { $('specMsg').textContent = 'could not open input: ' + e.message; return; }
+  specCtx = new AudioContext();
+  await specCtx.resume();
+  const src = specCtx.createMediaStreamSource(specStream);
+  specAnalyser = specCtx.createAnalyser();
+  specAnalyser.fftSize = 4096; specAnalyser.smoothingTimeConstant = 0.82;
+  src.connect(specAnalyser);
+  $('specDevice').textContent = $('specInput').selectedOptions[0] ? $('specInput').selectedOptions[0].textContent : 'input';
+  $('specMsg').textContent = '';
+  drawSpectrum();
+}
+function stopSpectrum() {
+  if (specRAF) { cancelAnimationFrame(specRAF); specRAF = null; }
+  if (specStream) { specStream.getTracks().forEach(t => t.stop()); specStream = null; }
+  if (specCtx) { try { specCtx.close(); } catch (e) {} specCtx = null; }
+  specAnalyser = null;
+}
+function drawSpectrum() {
+  const cv = $('specCanvas'); const g = cv.getContext('2d');
+  const W = cv.width = cv.clientWidth, H = cv.height;
+  const bins = specAnalyser.frequencyBinCount;
+  const freqData = new Float32Array(bins);
+  function frame() {
+    specAnalyser.getFloatFrequencyData(freqData);
+    const spl = (lastLive && lastLive.spl != null && !lastLive.silent) ? lastLive.spl : null;
+    $('specDb').textContent = spl != null ? spl.toFixed(1) + ' dB SPL' : '';
+    g.clearRect(0, 0, W, H);
+    const nbars = 72, step = Math.floor(bins / nbars);
+    for (let b = 0; b < nbars; b++) {
+      let m = -140; for (let k = 0; k < step; k++) { const v = freqData[b * step + k]; if (v > m) m = v; }
+      const norm = Math.max(0, Math.min(1, (m + 100) / 100));
+      const bh = norm * (H - 14);
+      const x = b * (W / nbars);
+      const hue = 165 - norm * 165;
+      g.fillStyle = `hsl(${hue},72%,55%)`;
+      g.fillRect(x + 1, H - bh, (W / nbars) - 2, bh);
+    }
+    specRAF = requestAnimationFrame(frame);
+  }
+  frame();
+}
+$('specStart').addEventListener('click', startSpectrum);
+$('specStop').addEventListener('click', () => { stopSpectrum(); $('specMsg').textContent = 'stopped'; });
 
 // ----- init -----
 async function init() {

@@ -18,6 +18,8 @@
     <nav class="tabs" id="tabs">
       <button data-tab="dashboard" class="active">Dashboard</button>
       <button data-tab="settings">Settings</button>
+      <button data-tab="calibration">Calibration</button>
+      <button data-tab="spectrum">Spectrum</button>
     </nav>
   </header>
 
@@ -125,6 +127,57 @@
         <p class="fineprint">Data comes from the dbmon background service (SQLite at ~/.local/share/dbmon/data.db). SPL is C-weighted and headphone-estimated, so treat it as a ballpark, not an audiology instrument. Calibrate a device with <code>dbmon calibrate</code>.</p>
       </section>
     </div>
+    <!-- CALIBRATION -->
+    <div class="view" id="view-calibration">
+      <section class="card">
+        <div class="card-title">New calibration (current output device)</div>
+        <p class="muted">Set the device you want as the system output, fix the volume, and hold your SPL meter at the ear cup. On active headphones (AirPods Max etc.) block the wear sensor so the level does not ramp. Start at low volume.</p>
+        <div class="caprow" style="margin-top:14px">
+          <label class="muted">Frequency</label>
+          <select id="calFreq" class="select">
+            <option>250</option><option>500</option><option selected>1000</option><option>2000</option><option>4000</option><option>8000</option>
+          </select>
+          <span class="muted">Hz</span>
+          <span id="calDevInfo" class="muted" style="margin-left:auto"></span>
+        </div>
+        <table class="devtable" id="calTable" style="margin-top:14px">
+          <thead><tr><th>Tone level</th><th>Play</th><th>Captured RMS</th><th>Measured SPL (dB)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="caprow" style="margin-top:16px">
+          <button id="calSave" class="btn">Save calibration</button>
+          <span id="calMsg" class="muted"></span>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-title">Stored calibrations</div>
+        <table class="devtable" id="calList">
+          <thead><tr><th>Device</th><th>Volume</th><th>Freq</th><th>Curve</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </div>
+
+    <!-- SPECTRUM -->
+    <div class="view" id="view-spectrum">
+      <section class="card">
+        <div class="live-head">
+          <span class="tag" style="background:var(--accent);color:#052b21">SPECTRUM</span>
+          <span id="specDevice" class="live-device">pick an input and press Start</span>
+          <span id="specDb" class="live-vol"></span>
+        </div>
+        <canvas id="specCanvas" height="240" style="width:100%;margin-top:14px"></canvas>
+        <div class="caprow" style="margin-top:14px">
+          <label class="muted">Input</label>
+          <select id="specInput" class="select"></select>
+          <button id="specStart" class="btn">Start</button>
+          <button id="specStop" class="btn">Stop</button>
+          <span id="specMsg" class="muted"></span>
+        </div>
+        <p class="fineprint">Live frequency spectrum of your output, captured from the device monitor. The big number is a frequency-weighted SPL estimate built from your per-frequency calibration across the spectrum.</p>
+      </section>
+    </div>
+
   </main>
 
   <canvas id="trayCanvas" width="72" height="72" style="display:none"></canvas>

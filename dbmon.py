@@ -61,8 +61,8 @@ def conn():
       CREATE TABLE IF NOT EXISTS samples(
         ts REAL, device TEXT, rms REAL, peak REAL, volume REAL, dur REAL);
       CREATE TABLE IF NOT EXISTS calib(
-        device TEXT, volume REAL, slope REAL, offset REAL, weighting TEXT, ts REAL,
-        PRIMARY KEY(device, volume));
+        device TEXT, volume REAL, freq REAL, slope REAL, offset REAL, weighting TEXT, ts REAL,
+        PRIMARY KEY(device, volume, freq));
       CREATE TABLE IF NOT EXISTS devices(
         name TEXT PRIMARY KEY, label TEXT, last_seen REAL, whitelisted INTEGER DEFAULT 0);
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
@@ -72,6 +72,12 @@ def conn():
     cols = [r[1] for r in c.execute("PRAGMA table_info(devices)")]
     if "whitelisted" not in cols:
         c.execute("ALTER TABLE devices ADD COLUMN whitelisted INTEGER DEFAULT 0")
+    ccols = [r[1] for r in c.execute("PRAGMA table_info(calib)")]
+    if "freq" not in ccols:
+        c.execute("ALTER TABLE calib RENAME TO calib_old")
+        c.execute("CREATE TABLE calib(device TEXT, volume REAL, freq REAL, slope REAL, offset REAL, weighting TEXT, ts REAL, PRIMARY KEY(device,volume,freq))")
+        c.execute("INSERT INTO calib(device,volume,freq,slope,offset,weighting,ts) SELECT device,volume,1000,slope,offset,weighting,ts FROM calib_old")
+        c.execute("DROP TABLE calib_old")
     c.commit()
     return c
 
@@ -146,19 +152,36 @@ def capture(sink_id, secs=CHUNK):
 # ---------- calibration / SPL (PER DEVICE) ----------
 def calib_rows(c, device):
     """Calibration points for THIS device only (no cross-device fallback)."""
-    return c.execute("SELECT volume,slope,offset FROM calib WHERE device=? ORDER BY volume",
+    return c.execute("SELECT volume,freq,slope,offset FROM calib WHERE device=? ORDER BY volume,freq",
                      (device,)).fetchall()
 
-def to_spl(dbfs, volume, rows):
-    """Estimate SPL from measured dBFS + volume using nearest-volume calibration
-    for the device. Volume adjusted assuming ~dB-linear control (approx for BT).
-    Returns None if the device has no calibration."""
+def to_spl(dbfs, volume, rows, freq=1000.0):
+    """Estimate SPL from dBFS + volume, taking the device frequency response into
+    account: pick the nearest-volume curve at each calibrated frequency, then
+    linearly interpolate slope/offset across frequency (log scale), extrapolating
+    flat beyond the calibrated range. rows = (volume, freq, slope, offset)."""
     if not rows or dbfs is None or dbfs <= -119:
         return None
-    v, slope, off = min(rows, key=lambda r: abs(r[0]-volume))
-    spl = slope*dbfs + off
+    by_freq = {}
+    for v, f, sl, of in rows:
+        if f not in by_freq or abs(v - volume) < abs(by_freq[f][0] - volume):
+            by_freq[f] = (v, sl, of)
+    freqs = sorted(by_freq)
+    if freq <= freqs[0]:
+        v, sl, of = by_freq[freqs[0]]
+    elif freq >= freqs[-1]:
+        v, sl, of = by_freq[freqs[-1]]
+    else:
+        lo = max(x for x in freqs if x <= freq); hi = min(x for x in freqs if x >= freq)
+        if lo == hi:
+            v, sl, of = by_freq[lo]
+        else:
+            t = (math.log(freq) - math.log(lo)) / (math.log(hi) - math.log(lo))
+            vlo, sllo, oflo = by_freq[lo]; vhi, slhi, ofhi = by_freq[hi]
+            v = vlo; sl = sllo + (slhi - sllo) * t; of = oflo + (ofhi - oflo) * t
+    spl = sl * dbfs + of
     if volume > 0 and v > 0:
-        spl += 20*math.log10(volume/v)
+        spl += 20 * math.log10(volume / v)
     return spl
 
 # ---------- exposure math (NIOSH: 85 dB / 8 h / 3 dB exchange) ----------
@@ -263,8 +286,8 @@ def cmd_calibrate(args):
     n=len(pts); sx=sum(x for x,_ in pts); sy=sum(y for _,y in pts)
     sxx=sum(x*x for x,_ in pts); sxy=sum(x*y for x,y in pts)
     slope=(n*sxy-sx*sy)/(n*sxx-sx*sx); off=(sy-slope*sx)/n
-    c.execute("INSERT OR REPLACE INTO calib VALUES(?,?,?,?,?,?)",
-              (name, round(vol,3), slope, off, "C", time.time()))
+    c.execute("INSERT OR REPLACE INTO calib VALUES(?,?,?,?,?,?,?)",
+              (name, round(vol,3), 1000.0, slope, off, "C", time.time()))
     c.commit()
     print(f"\nStored calibration for {desc} @ {vol*100:.0f}%:  SPL = {slope:.3f}*dBFS + {off:.1f}")
     print("History for this device now re-derives with this curve.")
@@ -297,15 +320,48 @@ def cmd_whitelist(args):
 
 def cmd_addcalib(args):
     c = conn()
-    c.execute("INSERT OR REPLACE INTO calib VALUES(?,?,?,?,?,?)",
-              (args.device, args.volume, args.slope, args.offset, args.weighting, time.time()))
+    c.execute("INSERT OR REPLACE INTO calib VALUES(?,?,?,?,?,?,?)",
+              (args.device, args.volume, args.freq, args.slope, args.offset, args.weighting, time.time()))
     c.commit(); print("calibration stored.")
+
+def cmd_delcalib(args):
+    c = conn()
+    n = c.execute("DELETE FROM calib WHERE device=? AND volume=? AND freq=?",
+                  (args.device, args.volume, args.freq)).rowcount
+    c.commit(); print(json.dumps({"deleted": n}))
+
+def cmd_playtone(args):
+    c = conn()
+    s = default_sink()
+    if not s:
+        print(json.dumps({"error": "no default sink"})); return
+    sid, name, desc, vol = s
+    tmp = tempfile.mktemp(suffix=".wav", dir="/tmp")
+    subprocess.run(["sox","-n","-r","48000","-c","2",tmp,"synth",str(args.seconds),
+                    "sine",str(args.freq),"gain",str(-abs(args.level))], capture_output=True)
+    p = subprocess.Popen(["pw-play", tmp])
+    time.sleep(0.45)
+    res = capture(sid, 1.3)
+    try: p.terminate()
+    except Exception: pass
+    subprocess.run(["pkill","-f",tmp], capture_output=True)
+    try: os.remove(tmp)
+    except Exception: pass
+    print(json.dumps({"device": name, "label": desc, "volume": vol,
+                      "freq": args.freq, "level": args.level,
+                      "rms": (round(res[0],2) if res else None)}))
 
 def cmd_showcalib(args):
     c = conn()
-    print(f"{'device (label)':28} {'node':34} {'vol%':>5} {'slope':>7} {'offset':>7} wt")
-    for d,v,sl,of,wt,ts in c.execute("SELECT * FROM calib ORDER BY device,volume"):
-        print(f"{device_label(c,d)[:28]:28} {d[:34]:34} {v*100:5.0f} {sl:7.3f} {of:7.1f}  {wt}")
+    recs = []
+    for d,v,fr,sl,of,wt,ts in c.execute("SELECT * FROM calib ORDER BY device,volume,freq"):
+        recs.append({"device":d,"label":device_label(c,d),"volume":v,"freq":fr,
+                     "slope":sl,"offset":of,"weighting":wt})
+    if getattr(args,"json",False):
+        print(json.dumps(recs)); return
+    print(f"{'device (label)':24} {'vol%':>5} {'freq':>6} {'slope':>7} {'offset':>7} wt")
+    for r in recs:
+        print(f"{r['label'][:24]:24} {r['volume']*100:5.0f} {r['freq']:6.0f} {r['slope']:7.3f} {r['offset']:7.1f}  {r['weighting']}")
 
 def cmd_devices(args):
     c = conn()
@@ -349,7 +405,7 @@ def cmd_report(args):
     for ts,dev,rms,peak,vol,dur in rows:
         if only_wl and dev not in wl:
             excluded_dur+=dur; continue
-        D=dev_stats.setdefault(dev,{"dur":0.0,"energy":0.0,"max":-999,"dose":0.0,"over":0.0,"cal":bool(rows_for(dev))})
+        D=dev_stats.setdefault(dev,{"dur":0.0,"energy":0.0,"max":-999,"min":999.0,"dose":0.0,"over":0.0,"cal":bool(rows_for(dev))})
         D["dur"]+=dur
         spl=to_spl(rms,vol,rows_for(dev)); pspl=to_spl(peak,vol,rows_for(dev))
         if spl is None:
@@ -357,11 +413,13 @@ def cmd_report(args):
         D["energy"]+=dur*(10**(spl/10)); D["dose"]+=100*(dur/3600)/allowed_hours(spl)
         if spl>cap: D["over"]+=dur; tot_over+=dur
         if pspl>D["max"]: D["max"]=pspl
+        if spl<D["min"]: D["min"]=spl
         day=datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-        S=day_stats.setdefault(day,{"dur":0.0,"energy":0.0,"max":-999,"dose":0.0,"over":0.0})
+        S=day_stats.setdefault(day,{"dur":0.0,"energy":0.0,"max":-999,"min":999.0,"dose":0.0,"over":0.0})
         S["dur"]+=dur; S["energy"]+=dur*(10**(spl/10)); S["dose"]+=100*(dur/3600)/allowed_hours(spl)
         if spl>cap: S["over"]+=dur
         if pspl>S["max"]: S["max"]=pspl
+        if spl<S["min"]: S["min"]=spl
         tot_dur+=dur; energy+=dur*(10**(spl/10))
         if pspl>overall_max[0]: overall_max=(pspl,day,datetime.fromtimestamp(ts).strftime("%H:%M"))
     leq=lambda en,du: 10*math.log10(en/du) if du>0 else 0.0
@@ -379,6 +437,7 @@ def cmd_report(args):
             "by_day": [
                 {"date": day, "hours": round(day_stats[day]["dur"]/3600, 3),
                  "leq": round(leq(day_stats[day]["energy"], day_stats[day]["dur"]), 1),
+                 "min": (round(day_stats[day]["min"], 1) if day_stats[day]["min"] < 999 else None),
                  "max": (round(day_stats[day]["max"], 1) if day_stats[day]["max"] > -999 else None),
                  "over_hours": round(day_stats[day]["over"]/3600, 3),
                  "dose": round(day_stats[day]["dose"], 1)}
@@ -434,7 +493,7 @@ def main():
     sub.add_parser("daemon").set_defaults(f=cmd_daemon)
     lv=sub.add_parser("live"); lv.add_argument("--json",action="store_true"); lv.set_defaults(f=cmd_live)
     sub.add_parser("calibrate").set_defaults(f=cmd_calibrate)
-    sub.add_parser("showcalib").set_defaults(f=cmd_showcalib)
+    sc=sub.add_parser("showcalib"); sc.add_argument("--json",action="store_true"); sc.set_defaults(f=cmd_showcalib)
     dv=sub.add_parser("devices"); dv.add_argument("--json",action="store_true"); dv.set_defaults(f=cmd_devices)
     w=sub.add_parser("whitelist")
     w.add_argument("action",nargs="?",choices=["add","rm","list"],default="list")
@@ -450,8 +509,17 @@ def main():
     r.set_defaults(f=cmd_report)
     a=sub.add_parser("addcalib")
     a.add_argument("--device",required=True); a.add_argument("--volume",type=float,required=True)
+    a.add_argument("--freq",type=float,default=1000)
     a.add_argument("--slope",type=float,required=True); a.add_argument("--offset",type=float,required=True)
     a.add_argument("--weighting",default="C"); a.set_defaults(f=cmd_addcalib)
+    dc=sub.add_parser("delcalib")
+    dc.add_argument("--device",required=True); dc.add_argument("--volume",type=float,required=True)
+    dc.add_argument("--freq",type=float,default=1000); dc.set_defaults(f=cmd_delcalib)
+    pt=sub.add_parser("playtone")
+    pt.add_argument("--freq",type=float,default=1000)
+    pt.add_argument("--level",type=float,default=12)
+    pt.add_argument("--seconds",type=float,default=2.0)
+    pt.set_defaults(f=cmd_playtone)
     args=ap.parse_args(); args.f(args)
 
 if __name__=="__main__":

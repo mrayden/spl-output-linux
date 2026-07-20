@@ -14,11 +14,12 @@ Type=Application
 Name=SPL Output Monitor
 Comment=Audio output loudness and listening exposure
 Exec=$APP/node_modules/.bin/electron $APP --no-sandbox
-Icon=audio-headphones
+Icon=$APP/icon.png
 Terminal=false
-Categories=AudioVideo;Utility;
-StartupWMClass=SPL Output Monitor
+Categories=AudioVideo;
+StartupWMClass=spl-output-monitor
 EOF
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
-echo "Done. Launch 'SPL Output Monitor' from your app menu, or run: npm start"
+echo "Done. Find 'SPL Output Monitor' in your app menu, then right-click its"
+echo "taskbar icon and choose Pin (or Add to Favorites) to keep it on the taskbar."

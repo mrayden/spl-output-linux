@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, session } = require('electron');
 const { spawn, execFile } = require('child_process');
 const path = require('path');
 const os = require('os');
@@ -99,6 +99,10 @@ ipcMain.handle('report', (e, { days, all, device }) =>
 ipcMain.handle('devices', () => runJSON(['devices', '--json']));
 ipcMain.handle('setCap', (e, v) => runCmd(['cap', String(v)]));
 ipcMain.handle('whitelist', (e, { match, on }) => runCmd(['whitelist', on ? 'add' : 'rm', match]));
+ipcMain.handle('playtone', (e, { freq, level }) => runJSON(['playtone', '--freq', String(freq), '--level', String(level), '--seconds', '2']));
+ipcMain.handle('addCalib', (e, { device, volume, freq, slope, offset }) => runCmd(['addcalib', '--device', device, '--volume', String(volume), '--freq', String(freq), '--slope', String(slope), '--offset', String(offset)]));
+ipcMain.handle('calibList', () => runJSON(['showcalib', '--json']));
+ipcMain.handle('delCalib', (e, { device, volume, freq }) => runCmd(['delcalib', '--device', device, '--volume', String(volume), '--freq', String(freq)]));
 ipcMain.handle('getUiSettings', () => settings);
 ipcMain.handle('setUiSetting', (e, { key, value }) => {
   settings[key] = value; saveSettings(settings);
@@ -114,7 +118,11 @@ ipcMain.on('tray-update', (e, { image, tip }) => {
   } catch (err) {}
 });
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  session.defaultSession.setPermissionRequestHandler((wc, perm, cb) => cb(true));
+  session.defaultSession.setPermissionCheckHandler(() => true);
+  createWindow();
+});
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 app.on('window-all-closed', () => { if (!settings.tray) { stopLive(); app.quit(); } });
 app.on('before-quit', () => { isQuitting = true; stopLive(); });

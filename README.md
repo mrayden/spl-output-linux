@@ -82,10 +82,17 @@ Then open "SPL Output Monitor" from your applications menu. Highlights:
 - Live meter with an over-cap warning, plus a badge when the current device is
   not calibrated or not whitelisted.
 - Time range tabs (24h, 7d, 30d) and a per-device filter.
-- OK / Loud status and daily bars colored green under the cap and red over it.
+- OK / Loud status and an Apple-style chart showing each day's min-to-max level
+  as a rounded capsule (green under the cap, red over it) with an average dot.
 - Settings tab: set the cap, toggle the tray icon (closing then hides to the
   tray instead of quitting), and choose whether non-whitelisted devices show by
   default.
+- Calibration tab: recalibrate or add calibration at multiple frequencies per
+  device. It plays test tones, captures the output level, you type the SPL from
+  your meter, and it fits and stores a per-frequency curve. SPL estimates then
+  interpolate across your calibrated frequencies (log scale).
+- Spectrum tab: a live frequency spectrum of your output (Web Audio FFT of the
+  device monitor) alongside the current calibrated SPL.
 
 The UI reads the same data as the CLI (it calls `dbmon ... --json`), so the
 background service must be installed and running.
