@@ -311,7 +311,7 @@ def cmd_report(args):
     leq=lambda en,du: 10*math.log10(en/du) if du>0 else 0.0
 
     scope = "whitelisted devices only" if only_wl else "ALL devices"
-    print(f"\n=== Audio exposure — last {args.days} day(s) — {scope} ===")
+    print(f"\n=== Audio exposure - last {args.days} day(s) - {scope} ===")
     if only_wl: print("(use --all to include non-whitelisted devices)")
     print(f"\n-- by device --")
     print(f"{'device':26} {'listening':>9} {'Leq':>6} {'max dB':>7} {'dose%':>6}  calib")
