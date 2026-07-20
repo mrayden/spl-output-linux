@@ -99,6 +99,8 @@ dbmon report              # last 7 days, broken down by device and by day
 dbmon report --days 30    # last 30 days
 dbmon report --all        # include non-whitelisted devices
 dbmon report --device XM5 # filter to one device
+dbmon cap 75              # set your personal loudness cap in dB (default 75)
+dbmon cap                 # show the current cap
 dbmon showcalib           # show stored calibration curves
 ```
 
@@ -108,19 +110,35 @@ Example report:
 === Audio exposure - last 7 day(s) - whitelisted devices only ===
 
 -- by device --
-device                     listening    Leq  max dB  dose%  calib
-AirPods Max                  9.30 h   71.4    88.1     62  yes
-WH-1000XM5                   2.10 h   68.2    79.6      9  yes
+device                     listen    Leq  max dB    >75dB  dose%  calib
+AirPods Max                9.30 h   71.4    88.1   1.40 h     62  yes
+WH-1000XM5                 2.10 h   68.2    79.6   0.20 h      9  yes
 
 -- by day (calibrated devices) --
-date        listening    Leq  max dB  dose%
-2026-07-14    1.80 h   70.9    85.3     11
-2026-07-15    2.40 h   72.6    88.1     22
+date          listen    Leq  max dB    >75dB  dose%
+2026-07-14    1.80 h   70.9    85.3   0.30 h     11
+2026-07-15    2.40 h   72.6    88.1   0.55 h     22
 ...
 
 TOTAL (calibrated): 11.40 h   Leq 70.8 dB   worst-case peak 88.1 dB
 Worst-case peak: 88.1 dB on 2026-07-15 at 21:42
+Over cap (75 dB): 1.60 h  (14% of listening)
 ```
+
+## Loudness cap
+
+Set a personal loudness limit and see how much time you spend above it.
+
+```
+dbmon cap 75     # set the cap to 75 dB (default is 75)
+dbmon cap        # show the current cap
+```
+
+Reports then include a column for time spent above the cap (per device and per
+day) plus a total, for example "Over cap (75 dB): 1.60 h (14% of listening)".
+The `dbmon live` readout prints a warning when the current level goes over the
+cap. This is separate from the NIOSH dose: the cap is your own comfort or safety
+line, while the dose follows the occupational standard.
 
 ## Loading a saved calibration
 

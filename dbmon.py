@@ -9,8 +9,12 @@ exposure over time and PER OUTPUT DEVICE (like iOS Health "Headphone Levels").
 
 The output device matters for the measurement, so devices are tracked
 individually, calibrated individually, and can be WHITELISTED: everything is
-always logged, but reports can exclude non-whitelisted devices (e.g. speakers /
-HDMI) so your exposure graphs only reflect the headphones you calibrated.
+always logged, but reports can exclude non-whitelisted devices so your exposure
+graphs only reflect the headphones you calibrated.
+
+Exposure uses the NIOSH dose model (85 dB / 8 h, 3 dB exchange). You can also
+set a personal loudness CAP (default 75 dB) and see how much time you spent
+above it, per device and per day.
 
 Raw dBFS + volume + device are stored, so re-calibrating later (or per device)
 re-derives ALL history for that device.
@@ -22,6 +26,7 @@ Subcommands:
   report      historical stats, by device and by day (whitelist-filtered)
   devices     list output devices seen + calibration + whitelist status
   whitelist   list / add / remove devices in the report whitelist
+  cap         show or set the personal loudness cap in dB (default 75)
   addcalib    manually add a calibration point for a device
   showcalib   print stored calibration
 """
@@ -45,6 +50,7 @@ APP = os.path.expanduser("~/.local/share/dbmon")
 DBF = os.path.join(APP, "data.db")
 CHUNK = 5.0            # seconds captured per sample
 LOG_ABOVE = -55.0      # rms dBFS below this = silence, not logged
+DEFAULT_CAP = 75.0     # default personal loudness cap in dB
 
 # ---------- storage ----------
 def conn():
@@ -59,15 +65,27 @@ def conn():
         PRIMARY KEY(device, volume));
       CREATE TABLE IF NOT EXISTS devices(
         name TEXT PRIMARY KEY, label TEXT, last_seen REAL, whitelisted INTEGER DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
       CREATE INDEX IF NOT EXISTS ix_ts ON samples(ts);
       CREATE INDEX IF NOT EXISTS ix_dev ON samples(device);
     """)
-    # migrate older DBs that lack the whitelisted column
     cols = [r[1] for r in c.execute("PRAGMA table_info(devices)")]
     if "whitelisted" not in cols:
         c.execute("ALTER TABLE devices ADD COLUMN whitelisted INTEGER DEFAULT 0")
     c.commit()
     return c
+
+def get_setting(c, key, default=None):
+    r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return r[0] if r else default
+
+def set_setting(c, key, value):
+    c.execute("""INSERT INTO settings(key,value) VALUES(?,?)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, str(value)))
+    c.commit()
+
+def get_cap(c):
+    return float(get_setting(c, "cap_db", DEFAULT_CAP))
 
 def upsert_device(c, name, label):
     c.execute("""INSERT INTO devices(name,label,last_seen,whitelisted) VALUES(?,?,?,0)
@@ -168,6 +186,7 @@ def cmd_daemon(args):
 
 def cmd_live(args):
     c = conn()
+    cap = get_cap(c)
     try:
         while True:
             s = default_sink()
@@ -182,12 +201,13 @@ def cmd_live(args):
                 rows = calib_rows(c, name)
                 spl = to_spl(rms, vol, rows); pspl = to_spl(peak, vol, rows)
                 flags = ("" if rows else " [UNCALIBRATED]") + ("" if name in wl or not wl else " [not-whitelisted]")
+                over = "  !! OVER %g dB" % cap if (spl is not None and spl > cap) else ""
                 if rms <= LOG_ABOVE:
                     print(f"{desc[:22]:22} {vol*100:3.0f}%   (silent){flags}                ", end="\r")
                 elif spl is None:
                     print(f"{desc[:22]:22} {vol*100:3.0f}%   RMS {rms:6.1f}dBFS{flags}   ", end="\r")
                 else:
-                    print(f"{desc[:22]:22} {vol*100:3.0f}%   RMS {rms:6.1f}dBFS  ~{spl:5.1f} dB SPL  (peak ~{pspl:5.1f}){flags}   ", end="\r")
+                    print(f"{desc[:22]:22} {vol*100:3.0f}%   RMS {rms:6.1f}dBFS  ~{spl:5.1f} dB SPL  (peak ~{pspl:5.1f}){over}{flags}   ", end="\r")
             sys.stdout.flush()
     except KeyboardInterrupt:
         print()
@@ -234,6 +254,14 @@ def cmd_calibrate(args):
     print(f"\nStored calibration for {desc} @ {vol*100:.0f}%:  SPL = {slope:.3f}*dBFS + {off:.1f}")
     print("History for this device now re-derives with this curve.")
 
+def cmd_cap(args):
+    c = conn()
+    if args.value is not None:
+        set_setting(c, "cap_db", args.value)
+        print(f"Loudness cap set to {args.value:g} dB. Reports show time above it; live warns when exceeded.")
+    else:
+        print(f"Current loudness cap: {get_cap(c):g} dB   (set with: dbmon cap <dB>)")
+
 def cmd_whitelist(args):
     c = conn()
     if args.action in ("add","rm"):
@@ -243,12 +271,11 @@ def cmd_whitelist(args):
         if cur.rowcount==0 and args.action=="add":
             c.execute("INSERT OR IGNORE INTO devices(name,label,last_seen,whitelisted) VALUES(?,?,?,1)",
                       (args.match,args.match,time.time()))
-            cur_rc=1
+            rc=1
         else:
-            cur_rc=cur.rowcount
+            rc=cur.rowcount
         c.commit()
-        print(f"{'whitelisted' if val else 'removed from whitelist'}: {cur_rc} device(s) matching '{args.match}'")
-    # always show current whitelist state
+        print(f"{'whitelisted' if val else 'removed from whitelist'}: {rc} device(s) matching '{args.match}'")
     print(f"\n{'device':30} {'node':34} whitelisted")
     for name,label,wl in c.execute("SELECT name,label,whitelisted FROM devices ORDER BY whitelisted DESC,label"):
         print(f"{(label or name)[:30]:30} {name[:34]:34} {'YES' if wl else 'no'}")
@@ -277,6 +304,7 @@ def cmd_devices(args):
 
 def cmd_report(args):
     c = conn()
+    cap = get_cap(c)
     now = time.time(); since = now - args.days*86400
     q = "SELECT ts,device,rms,peak,volume,dur FROM samples WHERE ts>=?"
     params = [since]
@@ -291,54 +319,61 @@ def cmd_report(args):
     def rows_for(dev):
         if dev not in cal_cache: cal_cache[dev]=calib_rows(c,dev)
         return cal_cache[dev]
-    dev_stats={}; day_stats={}; overall_max=(-999,None,None); tot_dur=0.0; energy=0.0; uncal_dur=0.0; excluded_dur=0.0
+    dev_stats={}; day_stats={}; overall_max=(-999,None,None)
+    tot_dur=0.0; energy=0.0; uncal_dur=0.0; excluded_dur=0.0; tot_over=0.0
     for ts,dev,rms,peak,vol,dur in rows:
         if only_wl and dev not in wl:
             excluded_dur+=dur; continue
-        D=dev_stats.setdefault(dev,{"dur":0.0,"energy":0.0,"max":-999,"dose":0.0,"cal":bool(rows_for(dev))})
+        D=dev_stats.setdefault(dev,{"dur":0.0,"energy":0.0,"max":-999,"dose":0.0,"over":0.0,"cal":bool(rows_for(dev))})
         D["dur"]+=dur
         spl=to_spl(rms,vol,rows_for(dev)); pspl=to_spl(peak,vol,rows_for(dev))
         if spl is None:
             uncal_dur+=dur; continue
         D["energy"]+=dur*(10**(spl/10)); D["dose"]+=100*(dur/3600)/allowed_hours(spl)
+        if spl>cap: D["over"]+=dur; tot_over+=dur
         if pspl>D["max"]: D["max"]=pspl
         day=datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-        S=day_stats.setdefault(day,{"dur":0.0,"energy":0.0,"max":-999,"dose":0.0})
+        S=day_stats.setdefault(day,{"dur":0.0,"energy":0.0,"max":-999,"dose":0.0,"over":0.0})
         S["dur"]+=dur; S["energy"]+=dur*(10**(spl/10)); S["dose"]+=100*(dur/3600)/allowed_hours(spl)
+        if spl>cap: S["over"]+=dur
         if pspl>S["max"]: S["max"]=pspl
         tot_dur+=dur; energy+=dur*(10**(spl/10))
         if pspl>overall_max[0]: overall_max=(pspl,day,datetime.fromtimestamp(ts).strftime("%H:%M"))
     leq=lambda en,du: 10*math.log10(en/du) if du>0 else 0.0
+    ocol = f">{cap:g}dB"
 
     scope = "whitelisted devices only" if only_wl else "ALL devices"
     print(f"\n=== Audio exposure - last {args.days} day(s) - {scope} ===")
     if only_wl: print("(use --all to include non-whitelisted devices)")
     print(f"\n-- by device --")
-    print(f"{'device':26} {'listening':>9} {'Leq':>6} {'max dB':>7} {'dose%':>6}  calib")
+    print(f"{'device':24} {'listen':>8} {'Leq':>6} {'max dB':>7} {ocol:>8} {'dose%':>6}  calib")
     for dev,D in sorted(dev_stats.items(), key=lambda kv:-kv[1]['dur']):
-        lbl=device_label(c,dev)[:26]
+        lbl=device_label(c,dev)[:24]
         if D["cal"]:
-            print(f"{lbl:26} {D['dur']/3600:6.2f} h {leq(D['energy'],D['dur']):6.1f} {D['max']:7.1f} {D['dose']:6.0f}  yes")
+            print(f"{lbl:24} {D['dur']/3600:6.2f} h {leq(D['energy'],D['dur']):6.1f} {D['max']:7.1f} {D['over']/3600:6.2f} h {D['dose']:6.0f}  yes")
         else:
-            print(f"{lbl:26} {D['dur']/3600:6.2f} h {'--':>6} {'--':>7} {'--':>6}  NO (calibrate)")
+            print(f"{lbl:24} {D['dur']/3600:6.2f} h {'--':>6} {'--':>7} {'--':>8} {'--':>6}  NO (calibrate)")
 
     if day_stats:
         print(f"\n-- by day (calibrated devices) --")
-        print(f"{'date':11} {'listening':>9} {'Leq':>6} {'max dB':>7} {'dose%':>6}")
+        print(f"{'date':11} {'listen':>8} {'Leq':>6} {'max dB':>7} {ocol:>8} {'dose%':>6}")
         for day in sorted(day_stats):
             S=day_stats[day]
-            print(f"{day:11} {S['dur']/3600:6.2f} h {leq(S['energy'],S['dur']):6.1f} {S['max']:7.1f} {S['dose']:6.0f}")
+            print(f"{day:11} {S['dur']/3600:6.2f} h {leq(S['energy'],S['dur']):6.1f} {S['max']:7.1f} {S['over']/3600:6.2f} h {S['dose']:6.0f}")
 
-    print("-"*46)
+    print("-"*58)
     print(f"TOTAL (calibrated): {tot_dur/3600:.2f} h   Leq {leq(energy,tot_dur):.1f} dB   worst-case peak {overall_max[0]:.1f} dB")
     if overall_max[1]:
         print(f"Worst-case peak: {overall_max[0]:.1f} dB on {overall_max[1]} at {overall_max[2]}")
+    if tot_dur>0:
+        print(f"Over cap ({cap:g} dB): {tot_over/3600:.2f} h  ({100*tot_over/tot_dur:.0f}% of listening)")
     if uncal_dur>0:
         print(f"Uncalibrated listening (no SPL): {uncal_dur/3600:.2f} h  -> run 'dbmon calibrate' with that device active")
     if excluded_dur>0:
         print(f"Excluded (non-whitelisted): {excluded_dur/3600:.2f} h")
-    print("\nExposure dose = % of NIOSH daily safe limit (85 dB / 8 h, 3 dB exchange).")
-    print("100% = a full day's safe dose. SPL is C-weighted & headphone-estimated (ballpark).")
+    print(f"\nCap = your personal loudness limit ({cap:g} dB), set with 'dbmon cap <dB>'.")
+    print("Dose = % of NIOSH daily safe limit (85 dB / 8 h, 3 dB exchange); 100% = a full")
+    print("day's safe dose. SPL is C-weighted & headphone-estimated (ballpark).")
 
 def main():
     ap=argparse.ArgumentParser(prog="dbmon",description="per-device audio-exposure monitor")
@@ -352,6 +387,8 @@ def main():
     w.add_argument("action",nargs="?",choices=["add","rm","list"],default="list")
     w.add_argument("match",nargs="?",default="")
     w.set_defaults(f=cmd_whitelist)
+    cp=sub.add_parser("cap"); cp.add_argument("value",nargs="?",type=float,default=None)
+    cp.set_defaults(f=cmd_cap)
     r=sub.add_parser("report"); r.add_argument("--days",type=int,default=7)
     r.add_argument("--device",help="filter by device name substring")
     r.add_argument("--whitelisted",action="store_true",help="only whitelisted devices")
