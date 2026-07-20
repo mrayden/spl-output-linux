@@ -55,6 +55,41 @@ This copies `dbmon` into `~/.local/share/dbmon`, symlinks it into `~/.local/bin`
 and enables a systemd user service that logs in the background. Make sure
 `~/.local/bin` is on your PATH.
 
+## Desktop app (Electron UI)
+
+A GUI lives in `ui/`. It shows a live SPL meter, an OK / Loud status like the
+iOS Health "Headphone Audio Levels" screen, daily level bars colored by your
+cap, per-device filtering, a device list with whitelist toggles, a settings
+tab, and an optional tray icon that shows the current dB.
+
+Run it directly:
+
+```
+cd ui
+npm install
+npm start
+```
+
+Or install an app-menu launcher (this also runs npm install):
+
+```
+cd ui
+./install-ui.sh
+```
+
+Then open "SPL Output Monitor" from your applications menu. Highlights:
+
+- Live meter with an over-cap warning, plus a badge when the current device is
+  not calibrated or not whitelisted.
+- Time range tabs (24h, 7d, 30d) and a per-device filter.
+- OK / Loud status and daily bars colored green under the cap and red over it.
+- Settings tab: set the cap, toggle the tray icon (closing then hides to the
+  tray instead of quitting), and choose whether non-whitelisted devices show by
+  default.
+
+The UI reads the same data as the CLI (it calls `dbmon ... --json`), so the
+background service must be installed and running.
+
 ## Calibration
 
 1. Set the headphones you want as the system output and fix the volume, for

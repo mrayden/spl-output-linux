@@ -30,7 +30,7 @@ Subcommands:
   addcalib    manually add a calibration point for a device
   showcalib   print stored calibration
 """
-import argparse, sqlite3, subprocess, time, math, os, sys, tempfile, re, warnings
+import argparse, sqlite3, subprocess, time, math, os, sys, tempfile, re, warnings, json
 from datetime import datetime
 warnings.filterwarnings("ignore")
 try:
@@ -187,11 +187,14 @@ def cmd_daemon(args):
 def cmd_live(args):
     c = conn()
     cap = get_cap(c)
+    as_json = getattr(args, "json", False)
     try:
         while True:
             s = default_sink()
             if not s:
-                print("no default sink", end="\r"); time.sleep(1); continue
+                if as_json: print(json.dumps({"error": "no default sink"}), flush=True)
+                else: print("no default sink", end="\r")
+                time.sleep(1); continue
             sid, name, desc, vol = s
             upsert_device(c, name, desc); c.commit()
             wl = whitelist_set(c)
@@ -200,17 +203,29 @@ def cmd_live(args):
                 rms, peak = res
                 rows = calib_rows(c, name)
                 spl = to_spl(rms, vol, rows); pspl = to_spl(peak, vol, rows)
-                flags = ("" if rows else " [UNCALIBRATED]") + ("" if name in wl or not wl else " [not-whitelisted]")
-                over = "  !! OVER %g dB" % cap if (spl is not None and spl > cap) else ""
-                if rms <= LOG_ABOVE:
-                    print(f"{desc[:22]:22} {vol*100:3.0f}%   (silent){flags}                ", end="\r")
-                elif spl is None:
-                    print(f"{desc[:22]:22} {vol*100:3.0f}%   RMS {rms:6.1f}dBFS{flags}   ", end="\r")
+                silent = rms <= LOG_ABOVE
+                if as_json:
+                    print(json.dumps({
+                        "device": name, "label": desc, "volume": vol,
+                        "rms_dbfs": round(rms, 1), "peak_dbfs": round(peak, 1),
+                        "spl": (round(spl, 1) if spl is not None else None),
+                        "peak_spl": (round(pspl, 1) if pspl is not None else None),
+                        "silent": silent, "calibrated": bool(rows),
+                        "whitelisted": (name in wl), "cap": cap,
+                        "over_cap": (spl is not None and spl > cap),
+                        "ts": time.time()}), flush=True)
                 else:
-                    print(f"{desc[:22]:22} {vol*100:3.0f}%   RMS {rms:6.1f}dBFS  ~{spl:5.1f} dB SPL  (peak ~{pspl:5.1f}){over}{flags}   ", end="\r")
-            sys.stdout.flush()
+                    flags = ("" if rows else " [UNCALIBRATED]") + ("" if name in wl or not wl else " [not-whitelisted]")
+                    over = "  !! OVER %g dB" % cap if (spl is not None and spl > cap) else ""
+                    if silent:
+                        print(f"{desc[:22]:22} {vol*100:3.0f}%   (silent){flags}                ", end="\r")
+                    elif spl is None:
+                        print(f"{desc[:22]:22} {vol*100:3.0f}%   RMS {rms:6.1f}dBFS{flags}   ", end="\r")
+                    else:
+                        print(f"{desc[:22]:22} {vol*100:3.0f}%   RMS {rms:6.1f}dBFS  ~{spl:5.1f} dB SPL  (peak ~{pspl:5.1f}){over}{flags}   ", end="\r")
+                    sys.stdout.flush()
     except KeyboardInterrupt:
-        print()
+        if not as_json: print()
 
 def cmd_calibrate(args):
     c = conn()
@@ -294,13 +309,19 @@ def cmd_showcalib(args):
 
 def cmd_devices(args):
     c = conn()
-    print(f"{'device':28} {'last seen':17} {'listening':>9}  {'calib':6} whitelist")
+    devs = []
     for name,label,last,wl in c.execute("SELECT name,label,last_seen,whitelisted FROM devices ORDER BY last_seen DESC"):
         dur = c.execute("SELECT COALESCE(SUM(dur),0) FROM samples WHERE device=?", (name,)).fetchone()[0]
         cal = c.execute("SELECT COUNT(*) FROM calib WHERE device=?", (name,)).fetchone()[0]
-        ls = datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "-"
-        print(f"{(label or name)[:28]:28} {ls:17} {dur/3600:6.2f} h  "
-              f"{('yes' if cal else 'NO'):6} {'YES' if wl else 'no'}")
+        devs.append({"device":name,"label":label or name,"last_seen":last,
+                     "hours":round(dur/3600,3),"calibrated":bool(cal),"whitelisted":bool(wl)})
+    if getattr(args,"json",False):
+        print(json.dumps(devs)); return
+    print(f"{'device':28} {'last seen':17} {'listening':>9}  {'calib':6} whitelist")
+    for d in devs:
+        ls = datetime.fromtimestamp(d["last_seen"]).strftime("%Y-%m-%d %H:%M") if d["last_seen"] else "-"
+        print(f"{d['label'][:28]:28} {ls:17} {d['hours']:6.2f} h  "
+              f"{('yes' if d['calibrated'] else 'NO'):6} {'YES' if d['whitelisted'] else 'no'}")
 
 def cmd_report(args):
     c = conn()
@@ -312,7 +333,11 @@ def cmd_report(args):
         q += " AND device LIKE ?"; params.append(f"%{args.device}%")
     rows = c.execute(q+" ORDER BY ts", params).fetchall()
     if not rows:
-        print(f"No listening data in the last {args.days} day(s). Is the daemon running? (systemctl --user status dbmon)"); return
+        if getattr(args,"json",False):
+            print(json.dumps({"cap":cap,"days":args.days,"by_device":[],"by_day":[],"total":{"hours":0}}))
+        else:
+            print(f"No listening data in the last {args.days} day(s). Is the daemon running? (systemctl --user status dbmon)")
+        return
     wl = whitelist_set(c)
     only_wl = (args.whitelisted or bool(wl)) and not args.all
     cal_cache = {}
@@ -340,6 +365,34 @@ def cmd_report(args):
         tot_dur+=dur; energy+=dur*(10**(spl/10))
         if pspl>overall_max[0]: overall_max=(pspl,day,datetime.fromtimestamp(ts).strftime("%H:%M"))
     leq=lambda en,du: 10*math.log10(en/du) if du>0 else 0.0
+    if getattr(args, "json", False):
+        out = {
+            "cap": cap, "days": args.days, "scope": ("whitelisted" if only_wl else "all"),
+            "by_device": [
+                {"device": dev, "label": device_label(c, dev), "hours": round(D["dur"]/3600, 3),
+                 "leq": (round(leq(D["energy"], D["dur"]), 1) if D["cal"] and D["dur"] > 0 else None),
+                 "max": (round(D["max"], 1) if D["max"] > -999 else None),
+                 "over_hours": round(D["over"]/3600, 3),
+                 "dose": (round(D["dose"], 1) if D["cal"] else None),
+                 "calibrated": D["cal"]}
+                for dev, D in sorted(dev_stats.items(), key=lambda kv: -kv[1]["dur"])],
+            "by_day": [
+                {"date": day, "hours": round(day_stats[day]["dur"]/3600, 3),
+                 "leq": round(leq(day_stats[day]["energy"], day_stats[day]["dur"]), 1),
+                 "max": (round(day_stats[day]["max"], 1) if day_stats[day]["max"] > -999 else None),
+                 "over_hours": round(day_stats[day]["over"]/3600, 3),
+                 "dose": round(day_stats[day]["dose"], 1)}
+                for day in sorted(day_stats)],
+            "total": {
+                "hours": round(tot_dur/3600, 3), "leq": round(leq(energy, tot_dur), 1),
+                "worst_peak": (round(overall_max[0], 1) if overall_max[1] else None),
+                "worst_when": (f"{overall_max[1]} {overall_max[2]}" if overall_max[1] else None),
+                "over_hours": round(tot_over/3600, 3),
+                "over_pct": (round(100*tot_over/tot_dur) if tot_dur > 0 else 0),
+                "uncal_hours": round(uncal_dur/3600, 3),
+                "excluded_hours": round(excluded_dur/3600, 3)}
+        }
+        print(json.dumps(out)); return
     ocol = f">{cap:g}dB"
 
     scope = "whitelisted devices only" if only_wl else "ALL devices"
@@ -379,10 +432,10 @@ def main():
     ap=argparse.ArgumentParser(prog="dbmon",description="per-device audio-exposure monitor")
     sub=ap.add_subparsers(dest="cmd",required=True)
     sub.add_parser("daemon").set_defaults(f=cmd_daemon)
-    sub.add_parser("live").set_defaults(f=cmd_live)
+    lv=sub.add_parser("live"); lv.add_argument("--json",action="store_true"); lv.set_defaults(f=cmd_live)
     sub.add_parser("calibrate").set_defaults(f=cmd_calibrate)
     sub.add_parser("showcalib").set_defaults(f=cmd_showcalib)
-    sub.add_parser("devices").set_defaults(f=cmd_devices)
+    dv=sub.add_parser("devices"); dv.add_argument("--json",action="store_true"); dv.set_defaults(f=cmd_devices)
     w=sub.add_parser("whitelist")
     w.add_argument("action",nargs="?",choices=["add","rm","list"],default="list")
     w.add_argument("match",nargs="?",default="")
@@ -393,6 +446,7 @@ def main():
     r.add_argument("--device",help="filter by device name substring")
     r.add_argument("--whitelisted",action="store_true",help="only whitelisted devices")
     r.add_argument("--all",action="store_true",help="include non-whitelisted devices")
+    r.add_argument("--json",action="store_true")
     r.set_defaults(f=cmd_report)
     a=sub.add_parser("addcalib")
     a.add_argument("--device",required=True); a.add_argument("--volume",type=float,required=True)

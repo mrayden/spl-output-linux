@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>SPL Output Monitor</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="dot"></div>
+      <div>
+        <h1>SPL Output Monitor</h1>
+        <p class="sub">Per-device audio output loudness and listening exposure</p>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- DASHBOARD -->
+    <div class="view active" id="view-dashboard">
+      <div class="rowbar">
+        <div class="seg" id="daysSeg">
+          <button data-days="1">24h</button>
+          <button data-days="7" class="active">7d</button>
+          <button data-days="30">30d</button>
+        </div>
+        <select id="devFilter" class="select"><option value="">All devices</option></select>
+        <label class="chk"><input type="checkbox" id="allChk" /> include non-whitelisted</label>
+        <button id="refreshBtn" class="btn">Refresh</button>
+      </div>
+      <div class="statusbanner" id="statusBanner">
+        <span class="status-dot" id="statusDot"></span>
+        <div>
+          <div id="statusText" class="status-text">No data yet</div>
+          <div id="statusSub" class="status-sub muted"></div>
+        </div>
+      </div>
+
+      <section class="card live" id="liveCard">
+        <div class="live-head">
+          <span class="tag">LIVE</span>
+          <span id="liveDevice" class="live-device">waiting for audio...</span>
+          <span id="liveWarn" class="warn-badge" style="display:none"></span>
+          <span id="liveVol" class="live-vol"></span>
+        </div>
+        <div class="live-readout">
+          <div class="big"><span id="liveSpl">--</span><span class="unit">dB SPL</span></div>
+          <div class="live-side">
+            <div id="liveState" class="state">idle</div>
+            <div id="liveRms" class="muted"></div>
+          </div>
+        </div>
+        <div class="meter">
+          <div class="meter-fill" id="meterFill"></div>
+          <div class="meter-cap" id="meterCap"><span id="capLabel">cap</span></div>
+        </div>
+        <div class="meter-scale"><span>40</span><span>55</span><span>70</span><span>85</span><span>100 dB</span></div>
+      </section>
+
+      <section class="stats">
+        <div class="card stat"><div class="stat-label">Listening</div><div class="stat-val" id="sHours">--</div><div class="stat-unit">hours</div></div>
+        <div class="card stat"><div class="stat-label">Average (Leq)</div><div class="stat-val" id="sLeq">--</div><div class="stat-unit">dB</div></div>
+        <div class="card stat"><div class="stat-label">Worst peak</div><div class="stat-val" id="sMax">--</div><div class="stat-unit" id="sMaxWhen">dB</div></div>
+        <div class="card stat"><div class="stat-label">NIOSH dose</div><div class="stat-val" id="sDose">--</div><div class="stat-unit">% daily avg</div></div>
+        <div class="card stat"><div class="stat-label">Over cap</div><div class="stat-val" id="sOver">--</div><div class="stat-unit" id="sOverPct">hours</div></div>
+      </section>
+
+      <section class="card chart-card">
+        <div class="card-title">Daily listening and levels</div>
+        <div class="chart-wrap"><canvas id="chart"></canvas></div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Output devices</div>
+        <table class="devtable" id="devTable">
+          <thead><tr><th>Device</th><th>Listening</th><th>Calibrated</th><th>In graphs</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="view" id="view-settings">
+      <section class="card">
+        <div class="card-title">Personal loudness cap</div>
+        <div class="caprow">
+          <input type="number" id="capInput" min="40" max="120" step="1" />
+          <span class="muted">dB</span>
+          <button id="capSave" class="btn">Save cap</button>
+          <span id="capMsg" class="muted"></span>
+        </div>
+        <p class="fineprint">Reports count time above this limit and the live meter warns when exceeded. Separate from the NIOSH dose (85 dB for 8 h, 3 dB exchange).</p>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Tray icon</div>
+        <label class="setrow">
+          <span>
+            <span class="set-title">Show tray icon with live dB</span>
+            <span class="set-desc">Puts the current SPL in your system tray. Closing the window then hides to the tray instead of quitting.</span>
+          </span>
+          <span class="switch"><input type="checkbox" id="trayChk"><span class="slider"></span></span>
+        </label>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Defaults</div>
+        <label class="setrow">
+          <span>
+            <span class="set-title">Include non-whitelisted devices by default</span>
+            <span class="set-desc">Show every output device in the dashboard, not just whitelisted headphones.</span>
+          </span>
+          <span class="switch"><input type="checkbox" id="allDefaultChk"><span class="slider"></span></span>
+        </label>
+      </section>
+
+      <section class="card">
+        <div class="card-title">About</div>
+        <p class="fineprint">Data comes from the dbmon background service (SQLite at ~/.local/share/dbmon/data.db). SPL is C-weighted and headphone-estimated, so treat it as a ballpark, not an audiology instrument. Calibrate a device with <code>dbmon calibrate</code>.</p>
+      </section>
+    </div>
+  </main>
+
+  <canvas id="trayCanvas" width="72" height="72" style="display:none"></canvas>
+  <script src="vendor/chart.umd.min.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

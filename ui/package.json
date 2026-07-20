@@ -1,0 +1,14 @@
+{
+  "name": "spl-output-monitor",
+  "version": "1.0.0",
+  "description": "Electron UI for dbmon, the per-device audio output SPL and listening-exposure monitor",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "mrayden",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^30.5.1"
+  }
+}
