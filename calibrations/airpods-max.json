@@ -1,0 +1,23 @@
+{
+  "label": "AirPods Max (Gen 1), A2DP",
+  "device_node_hint": "bluez_output.XX_XX_XX_XX_XX_XX.1",
+  "volume": 0.5,
+  "weighting": "C",
+  "tone_hz": 1000,
+  "fit": {
+    "slope": 1.075,
+    "offset": 91.2,
+    "formula": "SPL = 1.075 * dBFS + 91.2"
+  },
+  "raw_points_rms_dbfs_to_spl": [
+    [-9.17, 81.5],
+    [-15.17, 74.9],
+    [-21.17, 68.6]
+  ],
+  "notes": [
+    "Measured with a physical SPL meter held at the ear cup.",
+    "AirPods Max are active headphones. The on-head wear sensor was blocked so the internal DSP did not ramp the level during the steady tone.",
+    "Replace device_node_hint with your own node name from: wpctl inspect @DEFAULT_AUDIO_SINK@ | grep node.name",
+    "Load with: dbmon addcalib --device <node.name> --volume 0.5 --slope 1.075 --offset 91.2 --weighting C"
+  ]
+}

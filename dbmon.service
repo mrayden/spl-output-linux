@@ -1,0 +1,13 @@
+[Unit]
+Description=dbmon headphone audio-exposure monitor
+After=pipewire.service wireplumber.service graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/dbmon daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
